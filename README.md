@@ -3,8 +3,6 @@
 一个 Xposed / LSPosed 模块：让一加 / OPPO 国行「深度测试」App 看到**真实的** Bootloader 解锁状态，
 同时不影响 tricky_store / AlwaysStrong 等 Play Integrity 伪装模块。
 
-> 「深度测试」只有国内版 ColorOS / 氧OS 国行机型才有，所以本模块只针对这一场景。
-
 ---
 
 ## 背景
@@ -61,13 +59,12 @@ com.coloros.deeptesting ──binder──▶ PersistentDataBlockService$1.getFl
 
 ## 环境要求
 
-- Android 12–15（实测环境：**ColorOS 17.0.1.200 / 一加平板 3 Pro / Android 15**）
+- Android 12–17（实测环境：**ColorOS 17.0.1.200 / 一加平板 3 Pro / Android 15**）
 - LSPosed（或任何提供 legacy API 的 Xposed 框架，`xposedminversion=82`）
-- Root 管理器：APatch / KernelSU / Magisk 均可，只要能加载 LSPosed
 
 ## 构建
 
-依赖 JDK 17、Android build-tools 34、`android.jar`（platform-34）。全程离线，不用 Gradle。
+依赖 JDK 17、Android build-tools 34、`android.jar`（platform-34）。不用 Gradle。
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\build.ps1 `
@@ -89,11 +86,7 @@ powershell -ExecutionPolicy Bypass -File .\build.ps1 `
 
 ## 安装
 
-1. 安装 APK。ColorOS 上普通 `adb install` 会卡在 OPPO 安装确认框，走 root 安装可跳过：
-   ```sh
-   adb push DeepTestGuard.apk /data/local/tmp/
-   adb shell su -c 'pm install -r -t /data/local/tmp/DeepTestGuard.apk'
-   ```
+1. 安装 APK。
 2. 在 LSPosed 里启用 **DeepTest Guard**，作用域**只勾「系统框架」**。
 3. 重启整机。hook 在 `system_server` 里，必须整机重启才生效。
 
