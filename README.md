@@ -1,67 +1,73 @@
 # DeepTest Guard
 
-**EN** — An Xposed/LSPosed module that keeps the OnePlus/OPPO *深度测试* (Deep Testing) app showing the
-**real** bootloader unlock state, while Play Integrity spoofing modules keep faking a locked device.
-
-**中文** — 一个 Xposed/LSPosed 模块：让一加/OPPO「深度测试」App 看到**真实的** Bootloader 解锁状态，
+一个 Xposed / LSPosed 模块：让一加 / OPPO 国行「深度测试」App 看到**真实的** Bootloader 解锁状态，
 同时不影响 tricky_store / AlwaysStrong 等 Play Integrity 伪装模块。
+
+> 「深度测试」只有国内版 ColorOS / 氧OS 国行机型才有，所以本模块只针对这一场景。
 
 ---
 
-## 背景 / Background
+## 背景
 
-The Deep Testing app decides between “已解锁 / 未解锁” with exactly one value:
+「深度测试」判断"已解锁 / 未解锁"只看一个值：
 
 ```java
 // com.coloros.deeptesting.utils.r#d(Context)
 ((PersistentDataBlockManager) ctx.getSystemService("persistent_data_block"))
-        .getFlashLockState();          // 0 = unlocked, 1 = locked
+        .getFlashLockState();          // 0 = 已解锁，1 = 未解锁
 ```
 
-which `com.android.server.pdb.PersistentDataBlockService$1` derives from `ro.boot.flash.locked`.
+服务端 `com.android.server.pdb.PersistentDataBlockService$1` 把这个值映射自 `ro.boot.flash.locked`。
 
-Play Integrity “STRONG” checks want the opposite value, so modules such as **tricky_store (AlwaysStrong)**
-do this at boot:
+而 Play Integrity 的 STRONG 判定要求设备"看起来是锁定的"，于是 **tricky_store（AlwaysStrong）** 会在开机时：
 
 ```sh
 resetprop_if_diff ro.boot.flash.locked 1
 resetprop_if_diff ro.boot.verifiedbootstate green
 ```
 
-`resetprop` rewrites `/dev/__properties__` directly, so **both Java and native readers** see `1` —
-every global workaround (disabling LuckyTool's “disable dm-verity verification”, APatch's exclude-modifications,
-etc.) cannot satisfy both consumers at once:
+`resetprop` 直接改写 `/dev/__properties__`，**Java 层和 native 层读到的都是 1**。
+所以一切全局改法都失效：
 
-| Consumer | Wants `ro.boot.flash.locked` |
+| 尝试 | 为什么没用 |
 |---|---|
-| Play Integrity (`com.android.vending`, `com.google.android.gms`, …) | `1` |
-| Deep Testing app | `0` |
+| 关掉 LuckyTool「禁用 dm-verity 校验」 | 那只是 Java 层 hook，管不到 resetprop |
+| APatch「排除修改」 | 只对 APatch 自己的模块机制生效，管不到 tricky_store 的 service.sh |
+| 卸载 / 禁用 tricky_store | 能恢复显示，但 Play Integrity 伪装同时没了 |
 
-## 工作原理 / How it works
+两者诉求正好相反：
 
-The module hooks the *server side* of the binder call inside `system_server`
-and only rewrites the result for the Deep Testing caller:
+| 消费方 | 想要的 `ro.boot.flash.locked` |
+|---|---|
+| Play Integrity（`com.android.vending`、`com.google.android.gms`、keyattestation …） | `1` |
+| 深度测试 App | `0` |
+
+同一个全局属性无法同时满足，所以只能**按调用者分流**。
+
+## 工作原理
+
+模块 hook 的是 `system_server` 里那个 binder 方法的**服务端**，只对被深度测试调用的那一次改返回值：
 
 ```
 com.coloros.deeptesting ──binder──▶ PersistentDataBlockService$1.getFlashLockState()
                                      │
-              afterHookedMethod ─────┤ Binder.getCallingUid() → package of caller?
-                                     │   ├─ com.coloros.deeptesting → return 0
-                                     │   └─ anything else         → return original (1)
+              afterHookedMethod ─────┤ Binder.getCallingUid() → 调用者是哪个包？
+                                     │   ├─ com.coloros.deeptesting → 返回 0
+                                     │   └─ 其它任何进程           → 保留原值 1
 ```
 
-Caller detection uses `AppGlobals.getPackageManager().getPackagesForUid(uid)`, with a hard-coded
-UID fallback (`10291`) if the reflective lookup fails.
+调用者识别用 `AppGlobals.getPackageManager().getPackagesForUid(uid)`；
+若反射失败，回退到硬编码 uid `10291`。
 
-## 环境要求 / Requirements
+## 环境要求
 
-- Android 12–15 (developed and verified on **ColorOS 17.0.1.200, OnePlus Pad 3 Pro / OPPO pad, Android 15**)
-- LSPosed (or any Xposed framework exposing the legacy API, `xposedminversion=82`)
-- Root manager: APatch / KernelSU / Magisk — anything that can load LSPosed
+- Android 12–15（实测环境：**ColorOS 17.0.1.200 / 一加平板 3 Pro / Android 15**）
+- LSPosed（或任何提供 legacy API 的 Xposed 框架，`xposedminversion=82`）
+- Root 管理器：APatch / KernelSU / Magisk 均可，只要能加载 LSPosed
 
-## 构建 / Build
+## 构建
 
-Requires JDK 17, Android build-tools 34 and `android.jar` (platform-34). Everything is offline, no Gradle.
+依赖 JDK 17、Android build-tools 34、`android.jar`（platform-34）。全程离线，不用 Gradle。
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\build.ps1 `
@@ -69,51 +75,48 @@ powershell -ExecutionPolicy Bypass -File .\build.ps1 `
   -Jar "C:\path\to\platforms\android-34\android.jar"
 ```
 
-Convention used by the script:
+脚本做的事：
 
-- `javac` compiles `src/**` against `android.jar` (`-source 8 -target 8`).
-- `d8` converts **every** class under `com/dualos/deeptestguard/` — the anonymous inner class
-  `MainHook$1` must be included, otherwise LSPosed throws `ClassNotFoundException` at boot.
-- `de/robv/android/xposed/**` are compile-only stubs and are **not** put into `classes.dex`;
-  the real implementation is provided by the framework at runtime.
-- `aapt2 link` → inject `classes.dex` → `zipalign` → `apksigner`.
+- `javac` 用 `android.jar` 作 bootclasspath 编译 `src/**`（`-source 8 -target 8`）
+- `d8` 必须把 `com/dualos/deeptestguard/` 下**所有** class 都传进去 —— 漏了匿名内部类 `MainHook$1`，
+  开机时 LSPosed 会报 `ClassNotFoundException`，hook 静默失败
+- `de/robv/android/xposed/**` 只是编译期 stub，**不进 `classes.dex`**，运行时由框架提供真实实现
+- `aapt2 link` → 塞入 `classes.dex` → `zipalign` → `apksigner`
 
-The output is `DeepTestGuard.apk`.
+产物是 `DeepTestGuard.apk`。
 
-> Keep `build.ps1` ASCII-only: Windows PowerShell 5.1 decodes non-ASCII scripts as ANSI and fails to parse.
+> `build.ps1` 必须保持纯 ASCII：Windows PowerShell 5.1 会按 ANSI 解码非 ASCII 脚本，导致语法错误。
 
-## 安装 / Install
+## 安装
 
-1. Install the APK. On ColorOS the normal `adb install` may hang on the OPPO package-installer dialog;
-   installing through root skips it:
+1. 安装 APK。ColorOS 上普通 `adb install` 会卡在 OPPO 安装确认框，走 root 安装可跳过：
    ```sh
    adb push DeepTestGuard.apk /data/local/tmp/
    adb shell su -c 'pm install -r -t /data/local/tmp/DeepTestGuard.apk'
    ```
-2. Enable **DeepTest Guard** in LSPosed and set its scope to **System Framework** only.
-3. Reboot. The hook lives in `system_server`, so a full reboot is required.
+2. 在 LSPosed 里启用 **DeepTest Guard**，作用域**只勾「系统框架」**。
+3. 重启整机。hook 在 `system_server` 里，必须整机重启才生效。
 
-### 验证 / Verify
+### 验证
 
 ```sh
-# must stay 1 / green: the spoof is still in place for everyone else
+# 这两项必须仍是 1 / green，说明对其它进程的伪装完好
 adb shell getprop ro.boot.flash.locked
 adb shell su -c 'dumpsys persistent_data_block | grep -E "Bootloader|Verified"'
 
-# LSPosed log should contain:
+# LSPosed 日志里应出现：
 #   DeepTestGuard: hooked getFlashLockState in system_server
 ```
 
-Then open the Deep Testing app — it must show **已解锁** while the values above still read `1` / `green`.
+然后打开「深度测试」：应显示**已解锁**，而上面两项仍是 `1` / `green`。
 
-## 已知限制 / Caveats
+## 已知限制
 
-- Hook target is `com.android.server.pdb.PersistentDataBlockService$1`. If a ROM build moves or renames it,
-  the module logs `PersistentDataBlockService$1 not found` and silently does nothing.
-- Only the Deep Testing package is special-cased (`com.coloros.deeptesting`, UID fallback `10291`).
-  Other OEM variants may use a different package name — edit `TARGET_PKG` and rebuild.
-- The module does not weaken Play Integrity by itself: it only affects the Deep Testing caller.
+- hook 目标是 `com.android.server.pdb.PersistentDataBlockService$1`。如果某个 ROM 把它改名或挪位置，
+  模块会打一行 `PersistentDataBlockService$1 not found` 然后什么都不做。
+- 只特判了 `com.coloros.deeptesting`（uid 兜底 `10291`）。其它机型若包名不同，改 `TARGET_PKG` 重新编译。
+- 模块本身不削弱 Play Integrity：它只影响深度测试这一个调用者。
 
-## 许可证 / License
+## 许可证
 
 [Apache-2.0](LICENSE)
